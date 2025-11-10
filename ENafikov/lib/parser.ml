@@ -58,7 +58,10 @@ let parse_string_lit =
 ;;
 
 let parse_literal = choice [ parse_int_lit; parse_bool_lit; parse_string_lit ]
-let parse_unary_op = choice [ symbol "-" *> return Negate; symbol "not" *> return LogicalNot ]
+
+let parse_unary_op =
+  choice [ symbol "-" *> return Negate; symbol "not" *> return LogicalNot ]
+;;
 
 let parse_name =
   let first_char =
@@ -306,7 +309,9 @@ let parse_declaration =
 ;;
 
 let parse_script =
-  let definitions_or_exprs = many parse_declaration <* option () (symbol ";;" >>| ignore) in
+  let definitions_or_exprs =
+    many parse_declaration <* option () (symbol ";;" >>| ignore)
+  in
   definitions_or_exprs <* whitespace
 ;;
 

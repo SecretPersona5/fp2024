@@ -1,4 +1,4 @@
-(** Copyright 2024-2025, Ruslan Nafikov  *)
+(** Copyright 2024-2025, Ruslan Nafikov *)
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
@@ -13,7 +13,8 @@ and runtime_value =
   | BoolValue of bool
   | StringValue of string
   | UnitValue
-  | ClosureValue of recursive_flag * pattern_node * pattern_node list * expr_node * runtime_env
+  | ClosureValue of
+      recursive_flag * pattern_node * pattern_node list * expr_node * runtime_env
   | ProductValue of runtime_value * runtime_value * runtime_value list
   | ListValue of runtime_value list
   | OptionalValue of runtime_value option
@@ -117,7 +118,8 @@ end = struct
              with
              | Ok result -> result
              | Unequal_lengths -> None)))
-    | ListPattern patterns, ListValue values when List.length patterns = List.length values ->
+    | ListPattern patterns, ListValue values
+      when List.length patterns = List.length values ->
       let rec match_lists env pat_list val_list =
         match pat_list, val_list with
         | [], [] -> Some env
@@ -185,7 +187,8 @@ end = struct
        | _ -> fail TypeMismatch)
     | LetExpr (false, (ListPattern patterns, e1), _, e2) ->
       let check_list_pattern = function
-        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | NamePattern _ | WildcardPattern | UnitPattern
+        | OptionalPattern (Some (NamePattern _)) -> true
         | _ -> false
       in
       if not (List.for_all patterns ~f:check_list_pattern)
@@ -197,7 +200,8 @@ end = struct
          | None -> fail PatternMatchFailed)
     | LetExpr (false, (ProductPattern (p1, p2, rest), e1), _, e2) ->
       let check_product_pattern = function
-        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | NamePattern _ | WildcardPattern | UnitPattern
+        | OptionalPattern (Some (NamePattern _)) -> true
         | _ -> false
       in
       if not (List.for_all ~f:check_product_pattern (p1 :: p2 :: rest))
@@ -210,7 +214,8 @@ end = struct
     | LetExpr (false, (pat, e1), _, e2) ->
       let check_simple_pattern =
         match pat with
-        | WildcardPattern | NamePattern _ | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | WildcardPattern | NamePattern _ | UnitPattern
+        | OptionalPattern (Some (NamePattern _)) -> true
         | _ -> false
       in
       if not check_simple_pattern
@@ -323,7 +328,8 @@ end = struct
       return env
     | BindingDeclaration (false, (ListPattern patterns, e), _) ->
       let check_list_pattern = function
-        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | NamePattern _ | WildcardPattern | UnitPattern
+        | OptionalPattern (Some (NamePattern _)) -> true
         | _ -> false
       in
       if not (List.for_all ~f:check_list_pattern patterns)
@@ -335,7 +341,8 @@ end = struct
          | None -> fail PatternMatchFailed)
     | BindingDeclaration (false, (ProductPattern (p1, p2, rest), e), _) ->
       let check_product_pattern = function
-        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | NamePattern _ | WildcardPattern | UnitPattern
+        | OptionalPattern (Some (NamePattern _)) -> true
         | _ -> false
       in
       if not (List.for_all ~f:check_product_pattern (p1 :: p2 :: rest))
@@ -348,7 +355,8 @@ end = struct
     | BindingDeclaration (false, (pattern, expr), _) ->
       let check_simple_pattern =
         match pattern with
-        | WildcardPattern | NamePattern _ | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | WildcardPattern | NamePattern _ | UnitPattern
+        | OptionalPattern (Some (NamePattern _)) -> true
         | _ -> false
       in
       if not check_simple_pattern
@@ -406,7 +414,6 @@ end = struct
       return env)
   ;;
 end
-
 
 module ResultMonad = struct
   type ('a, 'e) monad = ('a, 'e) Result.t

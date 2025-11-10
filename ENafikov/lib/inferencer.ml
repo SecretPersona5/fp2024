@@ -1,4 +1,4 @@
-(** Copyright 2024-2025, Ruslan Nafikov  *)
+(** Copyright 2024-2025, Ruslan Nafikov *)
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
@@ -17,7 +17,12 @@ type type_error =
 
 let print_error fmt = function
   | CircularCheck (id, ty) ->
-    fprintf fmt "CircularCheck failed. Type variable '%d occurs inside %a." id print_type ty
+    fprintf
+      fmt
+      "CircularCheck failed. Type variable '%d occurs inside %a."
+      id
+      print_type
+      ty
   | UnknownName name -> fprintf fmt "Unknown name '%s'." name
   | TypeMismatch (ty1, ty2) ->
     fprintf fmt "TypeMismatch: %a and %a." print_type ty1 print_type ty2
@@ -47,7 +52,11 @@ module InferenceMonad : sig
   val execute : 'a computation -> ('a, type_error) Result.t
 
   module TypeMap : sig
-    val fold : ('a, 'b, 'c) Map.t -> init:'d computation -> f:('a -> 'b -> 'd -> 'd computation) -> 'd computation
+    val fold
+      :  ('a, 'b, 'c) Map.t
+      -> init:'d computation
+      -> f:('a -> 'b -> 'd -> 'd computation)
+      -> 'd computation
   end
 end = struct
   type 'a computation = int -> int * ('a, type_error) Result.t
@@ -211,9 +220,7 @@ module TypeScheme = struct
   let free_vars (Forall (vars, ty)) = IntSet.diff (TypeOps.free_vars ty) vars
 
   let apply subst (Forall (vars, ty)) =
-    let subst2 =
-      IntSet.fold (fun key subst -> TypeSubst.remove subst key) vars subst
-    in
+    let subst2 = IntSet.fold (fun key subst -> TypeSubst.remove subst key) vars subst in
     Forall (vars, TypeSubst.apply_subst subst2 ty)
   ;;
 end
@@ -236,13 +243,16 @@ module Context = struct
     empty (module String)
     |> set
          ~key:"print_int"
-         ~data:(TypeScheme.Forall (IntSet.empty, FuncType (BaseType "int", BaseType "unit")))
+         ~data:
+           (TypeScheme.Forall (IntSet.empty, FuncType (BaseType "int", BaseType "unit")))
     |> set
          ~key:"print_endline"
-         ~data:(TypeScheme.Forall (IntSet.empty, FuncType (BaseType "string", BaseType "unit")))
+         ~data:
+           (TypeScheme.Forall (IntSet.empty, FuncType (BaseType "string", BaseType "unit")))
     |> set
          ~key:"print_bool"
-         ~data:(TypeScheme.Forall (IntSet.empty, FuncType (BaseType "bool", BaseType "unit")))
+         ~data:
+           (TypeScheme.Forall (IntSet.empty, FuncType (BaseType "bool", BaseType "unit")))
   ;;
 end
 
@@ -343,7 +353,8 @@ let rec infer_pattern ctx = function
 let type_of_binop = function
   | Equal | NotEqual | Greater | GreaterOrEqual | Less | LessOrEqual ->
     fresh_type_var >>| fun fresh_ty -> fresh_ty, fresh_ty, BaseType "bool"
-  | Add | Subtract | Multiply | Divide -> pure (BaseType "int", BaseType "int", BaseType "int")
+  | Add | Subtract | Multiply | Divide ->
+    pure (BaseType "int", BaseType "int", BaseType "int")
   | LogicalAnd | LogicalOr -> pure (BaseType "bool", BaseType "bool", BaseType "bool")
 ;;
 
@@ -477,7 +488,8 @@ let rec infer_expr ctx = function
     let* expr1 =
       match expr1 with
       | LambdaExpr _ -> pure expr1
-      | _ -> throw (ExpressionError "Right-hand side of let rec must be a lambda expression")
+      | _ ->
+        throw (ExpressionError "Right-hand side of let rec must be a lambda expression")
     in
     let* tv = fresh_type_var in
     let ctx2 = Context.add ctx x (TypeScheme.Forall (IntSet.empty, tv)) in
@@ -497,13 +509,17 @@ let rec infer_expr ctx = function
           let* expr =
             match expr with
             | LambdaExpr _ -> pure expr
-            | _ -> throw (ExpressionError "Right-hand side of let rec must be a lambda expression")
+            | _ ->
+              throw
+                (ExpressionError "Right-hand side of let rec must be a lambda expression")
           in
           let* pat =
             match pat with
             | NamePattern _ -> pure pat
             | _ ->
-              throw (PatternError "Only variables are allowed on the left-hand side of let rec")
+              throw
+                (PatternError
+                   "Only variables are allowed on the left-hand side of let rec")
           in
           let* ctx_acc, _ = acc_ctx in
           let* subst_expr, ty_expr = infer_expr ctx_acc expr in
@@ -570,7 +586,8 @@ let infer_declaration ctx = function
     let* expr =
       match expr with
       | LambdaExpr _ -> pure expr
-      | _ -> throw (ExpressionError "Right-hand side of let rec must be a lambda expression")
+      | _ ->
+        throw (ExpressionError "Right-hand side of let rec must be a lambda expression")
     in
     let* tv = fresh_type_var in
     let ctx = Context.add ctx x (TypeScheme.Forall (IntSet.empty, tv)) in
@@ -590,7 +607,9 @@ let infer_declaration ctx = function
             match pat with
             | NamePattern _ -> pure pat
             | _ ->
-              throw (PatternError "Only variables are allowed on the left-hand side of let rec")
+              throw
+                (PatternError
+                   "Only variables are allowed on the left-hand side of let rec")
           in
           let* ctx_acc = acc_ctx in
           let* subst_pat, _, ctx_pat = infer_pattern ctx_acc pat in
@@ -605,7 +624,9 @@ let infer_declaration ctx = function
           let* expr =
             match expr with
             | LambdaExpr _ -> pure expr
-            | _ -> throw (ExpressionError "Right-hand side of let rec must be a lambda expression")
+            | _ ->
+              throw
+                (ExpressionError "Right-hand side of let rec must be a lambda expression")
           in
           let* ctx_acc, _ = acc_ctx in
           let* subst_expr, ty_expr = infer_expr ctx_acc expr in
@@ -652,4 +673,6 @@ let infer_simple_expr expr =
   Result.map ~f:snd (execute (infer_expr Context.initial_context expr))
 ;;
 
-let run_inference str = Result.map ~f:snd (execute (infer_script Context.initial_context str))
+let run_inference str =
+  Result.map ~f:snd (execute (infer_script Context.initial_context str))
+;;

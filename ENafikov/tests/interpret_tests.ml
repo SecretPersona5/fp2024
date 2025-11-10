@@ -1,4 +1,4 @@
-(** Copyright 2024-2025, Ruslan Nafikov  *)
+(** Copyright 2024-2025, Ruslan Nafikov *)
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
@@ -11,7 +11,8 @@ let run_evaluation_test source_code =
   | Ok parsed_ast ->
     (match Eval.evaluate_script parsed_ast with
      | Ok _ -> ()
-     | Error runtime_error -> printf "Runtime error: %a\n" print_runtime_error runtime_error)
+     | Error runtime_error ->
+       printf "Runtime error: %a\n" print_runtime_error runtime_error)
   | Error parse_error -> printf "Parsing error: %s\n" parse_error
 ;;
 

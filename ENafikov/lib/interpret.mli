@@ -1,4 +1,4 @@
-(** Copyright 2024-2025, Ruslan Nafikov  *)
+(** Copyright 2024-2025, Ruslan Nafikov *)
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
@@ -12,7 +12,8 @@ and runtime_value =
   | BoolValue of bool
   | StringValue of string
   | UnitValue
-  | ClosureValue of recursive_flag * pattern_node * pattern_node list * expr_node * runtime_env
+  | ClosureValue of
+      recursive_flag * pattern_node * pattern_node list * expr_node * runtime_env
   | ProductValue of runtime_value * runtime_value * runtime_value list
   | ListValue of runtime_value list
   | OptionalValue of runtime_value option

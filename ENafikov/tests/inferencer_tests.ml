@@ -1,4 +1,4 @@
-(** Copyright 2024-2025, Ruslan Nafikov  *)
+(** Copyright 2024-2025, Ruslan Nafikov *)
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
@@ -17,7 +17,8 @@ let pretty_print_inference_result source =
        in
        Base.Map.iteri filtered_environment ~f:(fun ~key ~data:(Forall (_, type_expr)) ->
          Format.printf "val %s: %a\n" key print_type type_expr)
-     | Error inference_error -> Format.printf "Type inference error. %a\n" print_error inference_error)
+     | Error inference_error ->
+       Format.printf "Type inference error. %a\n" print_error inference_error)
   | Error parse_error -> Format.printf "Parsing error. %s\n" parse_error
 ;;
 
@@ -28,7 +29,8 @@ let pretty_print_simple_expression_type source =
      | [ ExprDeclaration expr_node ] ->
        (match infer_simple_expr expr_node with
         | Ok type_expr -> Format.printf "%a\n" print_type type_expr
-        | Error inference_error -> Format.printf "Type inference error. %a\n" print_error inference_error)
+        | Error inference_error ->
+          Format.printf "Type inference error. %a\n" print_error inference_error)
      | _ ->
        Format.printf
          "Expected a single expression, but got a program with multiple structures.\n")
@@ -123,7 +125,8 @@ let%expect_test "test_type_annotation" =
 
 let%expect_test "test_annotated_factorial" =
   pretty_print_inference_result
-    "let rec fac = fun (n : int) (acc : int) -> if n < 2 then acc else fac (n-1) (acc * n);;";
+    "let rec fac = fun (n : int) (acc : int) -> if n < 2 then acc else fac (n-1) (acc * \
+     n);;";
   [%expect {|val fac: int -> int -> int|}]
 ;;
 
