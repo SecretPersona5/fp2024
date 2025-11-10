@@ -2,54 +2,102 @@
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
-type ident = string [@@deriving eq, show { with_path = false }]
+open Format
 
-type const =
-  | Const_bool of bool (** Boolean constants *)
-  | Const_int of int (** Integer constants *)
-  | Const_string of string (** String constants *)
-  | Const_nil (** [] *)
-[@@deriving eq, show { with_path = false }]
+type name = string [@@deriving show { with_path = false }]
+type recursive_flag = bool [@@deriving show { with_path = false }]
 
-type bin_op =
-  | Add (** Addition: 1 + 2 *)
-  | Sub (** Subtraction: 2 - 1 *)
-  | Mul (** Multiplication: 4 * 2 *)
-  | Div (** Division: 8 / 2 *)
-  | Mod (** Modulus: 10 % 5 *)
-  | Eq (** Equality: 5 = 5 *)
-  | Con (** hd::tl *)
-  | Neq (** Inequality: 4 <> 3 *)
-  | Lt (** Less than: 7 < 10 *)
-  | Gt (** Greater than: 7 > 5 *)
-  | Leq (** Less than or equal to: 10 <= 10 *)
-  | Geq (** Greater than or equal to: 7 >= 7 *)
-  | Or (** Logical OR: true || false *)
-  | And (** Logical AND: true && false *)
-[@@deriving eq, show { with_path = false }]
-
-type pattern =
-  | Pattern_id of ident
-  | Pattern_const of const
-  | Pattern_list of pattern * pattern
-  | Pattern_tuple of pattern list
-  | Pattern_wild (** _ *)
-[@@deriving eq, show { with_path = false }]
-
-type expr =
-  | Expr_const of const (** Represents constant type (string, bool, or int) *)
-  | Expr_var of ident (** Variable *)
-  | Expr_fun of pattern * expr (** Function with pattern and type *)
-  | Expr_app of expr * expr (** Function application *)
-  | Expr_if of expr * expr * expr (** Conditional operator *)
-  | Expr_let_in of bool * ident * expr * expr (** Let binding with in clause *)
-  | Expr_bin_op of bin_op * expr * expr (** Binary operation, e.g., 2 + 2 - 3 *)
-  | Expr_match of expr * (pattern * expr) list (** match x_1 with | x_2   -> ... *)
-  | Expr_list of expr * expr (** [1;2;3]*)
-  | Expr_tuple of expr list (** (1,2,3)*)
-[@@deriving eq, show { with_path = false }]
-
-type struct_prog =
-  | Let of bool * ident * expr
-  | Expression of expr
+type binary_op =
+  | Add
+  | Subtract
+  | Multiply
+  | Divide
+  | LogicalAnd
+  | LogicalOr
+  | GreaterOrEqual
+  | LessOrEqual
+  | Greater
+  | Less
+  | Equal
+  | NotEqual
 [@@deriving show { with_path = false }]
+
+type unary_op =
+  | Negate
+  | LogicalNot
+[@@deriving show { with_path = false }]
+
+type literal =
+  | Integer of int
+  | Boolean of bool
+  | Text of string
+[@@deriving show { with_path = false }]
+
+type type_var = int [@@deriving show { with_path = false }]
+
+type type_expr =
+  | TypeVar of type_var
+  | BaseType of string
+  | FuncType of type_expr * type_expr
+  | ListType of type_expr
+  | ProductType of type_expr list
+  | OptionalType of type_expr
+[@@deriving show { with_path = false }]
+
+type pattern_node =
+  | NamePattern of name
+  | LiteralPattern of literal
+  | ProductPattern of pattern_node * pattern_node * pattern_node list
+  | WildcardPattern
+  | AnnotatedPattern of pattern_node * type_expr
+  | UnitPattern
+  | ListPattern of pattern_node list
+  | OptionalPattern of pattern_node option
+[@@deriving show { with_path = false }]
+
+type expr_node =
+  | NameExpr of name
+  | LiteralExpr of literal
+  | ConditionalExpr of expr_node * expr_node * expr_node option
+  | BinaryOpExpr of binary_op * expr_node * expr_node
+  | UnaryOpExpr of unary_op * expr_node
+  | ProductExpr of expr_node * expr_node * expr_node list
+  | ListExpr of expr_node list
+  | LambdaExpr of pattern_node list * expr_node
+  | TypeAnnotationExpr of expr_node * type_expr
+  | LetExpr of recursive_flag * binding * binding list * expr_node
+  | ApplyExpr of expr_node * expr_node
+  | OptionalExpr of expr_node option
+[@@deriving show { with_path = false }]
+
+and binding = pattern_node * expr_node [@@deriving show { with_path = false }]
+
+type declaration =
+  | ExprDeclaration of expr_node
+  | BindingDeclaration of recursive_flag * binding * binding list
+[@@deriving show { with_path = false }]
+
+type script = declaration list [@@deriving show { with_path = false }]
+
+let rec print_type fmt = function
+  | BaseType x -> fprintf fmt "%s" x
+  | TypeVar x -> fprintf fmt "'%d" x
+  | FuncType (l, r) ->
+    (match l, r with
+     | FuncType _, _ -> fprintf fmt "(%a) -> %a" print_type l print_type r
+     | _, _ -> fprintf fmt "%a -> %a" print_type l print_type r)
+  | ProductType elements ->
+    fprintf
+      fmt
+      "(%a)"
+      (pp_print_list ~pp_sep:(fun fmt () -> fprintf fmt " * ") print_type)
+      elements
+  | ListType ty ->
+    (match ty with
+     | FuncType _ | ProductType _ -> fprintf fmt "(%a) list" print_type ty
+     | _ -> fprintf fmt "%a list" print_type ty)
+  | OptionalType ty ->
+    (match ty with
+     | FuncType _ | ProductType _ -> fprintf fmt "(%a) option" print_type ty
+     | _ -> fprintf fmt "%a option" print_type ty)
+;;

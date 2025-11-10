@@ -1,272 +1,419 @@
-(** Copyright 2024-2025, Ruslan Nafikov *)
+(** Copyright 2024-2025, Ruslan Nafikov  *)
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
 open Ast
 open Base
+open Stdlib.Format
 
-(** main program *)
+type runtime_env = (name, runtime_value, String.comparator_witness) Map.t
 
-type error_inter =
-  | DivisionByZero (** Interpret Errors*)
-  | UnboundValue of string
-  | UnboundConstructor of string
-  | MatchFailure
-  | TypeError
-  | Unreachable
-  | StringOfLengthZero of string
-  | EmptyProgram
-  | NotImplemented
+and runtime_value =
+  | IntValue of int
+  | BoolValue of bool
+  | StringValue of string
+  | UnitValue
+  | ClosureValue of recursive_flag * pattern_node * pattern_node list * expr_node * runtime_env
+  | ProductValue of runtime_value * runtime_value * runtime_value list
+  | ListValue of runtime_value list
+  | OptionalValue of runtime_value option
+  | BuiltinFunction of (runtime_value -> (runtime_value, runtime_error) Result.t)
 
-let pp_error_inter fmt = function
-  | DivisionByZero -> Stdlib.Format.fprintf fmt "Exception: Division_by_zero."
-  | UnboundValue s -> Stdlib.Format.fprintf fmt "Error: Unbound value %s" s
-  | UnboundConstructor s -> Stdlib.Format.fprintf fmt "Error: Unbound constructor %s" s
-  | MatchFailure ->
-    Stdlib.Format.fprintf fmt "Exception: this pattern-matching is not exhaustive."
-  | EmptyProgram -> Stdlib.Format.fprintf fmt "the program was not provided or was empty"
-  | TypeError ->
-    Stdlib.Format.fprintf fmt "Error: type mismatch, a different type was expected"
-  | Unreachable ->
-    Stdlib.Format.fprintf fmt "Error: Unreachable error... Something went wrong..."
-  | StringOfLengthZero name ->
-    Stdlib.Format.fprintf fmt "It must not be of length zero: %s" name
-  | NotImplemented ->
-    Stdlib.Format.fprintf fmt "This feature has not yet been implemented"
+and runtime_error =
+  | UnboundName of name
+  | TypeMismatch
+  | DivisionByZero
+  | PatternMatchFailed
+  | InvalidPattern
+
+let print_runtime_error fmt = function
+  | UnboundName ident -> fprintf fmt "UnboundName: %S" ident
+  | TypeMismatch -> fprintf fmt "TypeMismatch"
+  | DivisionByZero -> fprintf fmt "DivisionByZero"
+  | PatternMatchFailed -> fprintf fmt "PatternMatchFailed"
+  | InvalidPattern -> fprintf fmt "InvalidPattern"
 ;;
 
-type value =
-  | VString of string
-  | VBool of bool
-  | VInt of int
-  | VList of value list
-  | VTuple of value list
-  | VFun of pattern * expr * (ident * value) list
-  | VLetWAPat of ident * value
-  | VNil (** [] *)
-[@@deriving show { with_path = false }]
+module type EvalMonad = sig
+  type ('a, 'e) monad
 
-module type MonadFail = sig
-  include Base.Monad.S2
-
-  val run : ('a, 'e) t -> ok:('a -> ('b, 'e) t) -> err:('e -> ('b, 'e) t) -> ('b, 'e) t
-  val fail : 'e -> ('a, 'e) t
-  val ( let* ) : ('a, 'e) t -> ('a -> ('b, 'e) t) -> ('b, 'e) t
+  val return : 'a -> ('a, 'e) monad
+  val fail : 'e -> ('a, 'e) monad
+  val ( let* ) : ('a, 'e) monad -> ('a -> ('b, 'e) monad) -> ('b, 'e) monad
 end
 
-let is_constr = function
-  | 'A' .. 'Z' -> true
-  | _ -> false
-;;
-
-type environment = (ident, value, String.comparator_witness) Map.t
-
-module Environment (M : MonadFail) = struct
+module EnvOps (M : EvalMonad) = struct
   open M
 
-  let empty = Map.empty (module Base.String)
+  let extend env key value = Map.update env key ~f:(fun _ -> value)
 
-  let find_val map key =
-    if String.length key = 0
-    then fail (StringOfLengthZero key)
-    else (
-      match Map.find map key with
-      | Some value -> return value
-      | None when is_constr @@ String.get key 0 -> fail (UnboundConstructor key)
-      | _ -> fail (UnboundValue key))
-  ;;
-
-  let add_bind map key value = Map.update map key ~f:(fun _ -> value)
-
-  let add_binds map binds =
-    List.fold ~f:(fun map (k, v) -> add_bind map k v) ~init:map binds
+  let lookup map key =
+    match Map.find map key with
+    | Some value -> return value
+    | None -> fail (UnboundName key)
   ;;
 end
 
-module Interpret (M : MonadFail) = struct
+module Evaluator (M : EvalMonad) : sig
+  val evaluate_script : script -> (runtime_env, runtime_error) M.monad
+end = struct
   open M
-  open Environment (M)
+  open EnvOps (M)
 
-  let rec bind_fun_params ?(env = empty) =
-    let bind_pat_list patl argl =
-      let binded_list =
-        List.fold2
-          patl
-          argl
-          ~f:(fun acc pat arg ->
-            let* acc = acc in
-            let* binding = bind_fun_params ~env (pat, arg) in
-            return (acc @ binding))
-          ~init:(return [])
+  let initial_env =
+    let open Base.Map in
+    empty (module String)
+    |> set
+         ~key:"print_int"
+         ~data:
+           (BuiltinFunction
+              (function
+                | IntValue i ->
+                  Stdlib.print_int i;
+                  Stdlib.print_newline ();
+                  Result.return UnitValue
+                | _ -> Result.fail TypeMismatch))
+    |> set
+         ~key:"print_endline"
+         ~data:
+           (BuiltinFunction
+              (function
+                | StringValue s ->
+                  Stdlib.print_endline s;
+                  Result.return UnitValue
+                | _ -> Result.fail TypeMismatch))
+    |> set
+         ~key:"print_bool"
+         ~data:
+           (BuiltinFunction
+              (function
+                | BoolValue b ->
+                  Stdlib.print_string (Bool.to_string b);
+                  Stdlib.print_newline ();
+                  Result.return UnitValue
+                | _ -> Result.fail TypeMismatch))
+  ;;
+
+  let rec match_pattern env = function
+    | WildcardPattern, _ -> Some env
+    | UnitPattern, UnitValue -> Some env
+    | LiteralPattern (Integer i1), IntValue i2 when i1 = i2 -> Some env
+    | LiteralPattern (Boolean b1), BoolValue b2 when Bool.equal b1 b2 -> Some env
+    | LiteralPattern (Text s1), StringValue s2 when String.equal s1 s2 -> Some env
+    | NamePattern x, v -> Some (extend env x v)
+    | AnnotatedPattern (pat, _), v -> match_pattern env (pat, v)
+    | ProductPattern (p1, p2, pl), ProductValue (v1, v2, vl) ->
+      (match match_pattern env (p1, v1) with
+       | None -> None
+       | Some env1 ->
+         (match match_pattern env1 (p2, v2) with
+          | None -> None
+          | Some env2 ->
+            (match
+               List.fold2 pl vl ~init:(Some env2) ~f:(fun acc_env p v ->
+                 match acc_env with
+                 | Some env' -> match_pattern env' (p, v)
+                 | None -> None)
+             with
+             | Ok result -> result
+             | Unequal_lengths -> None)))
+    | ListPattern patterns, ListValue values when List.length patterns = List.length values ->
+      let rec match_lists env pat_list val_list =
+        match pat_list, val_list with
+        | [], [] -> Some env
+        | p :: ps, v :: vs ->
+          (match match_pattern env (p, v) with
+           | Some new_env -> match_lists new_env ps vs
+           | None -> None)
+        | _ -> None
       in
-      match binded_list with
-      | Ok v -> v
-      | _ -> fail MatchFailure
-    in
-    function
-    | Pattern_wild, _ -> return []
-    | Pattern_const c, app_arg ->
-      (match c, app_arg with
-       | Const_bool b1, VBool b2 when Bool.equal b1 b2 -> return []
-       | Const_int i1, VInt i2 when i1 = i2 -> return []
-       | Const_string s1, VString s2 when String.equal s1 s2 -> return []
-       | Const_nil, VList v ->
-         (match v with
-          | [] -> return []
-          | _ -> fail MatchFailure)
-       | _ -> fail Unreachable)
-    | Pattern_id var, app_arg -> return [ var, app_arg ]
-    | (Pattern_list _ as pl), VList vl ->
-      (match pl, vl with
-       | Pattern_list (h, t), hd :: tl ->
-         let* evaledhd = bind_fun_params (h, hd) in
-         let* evaledtl = bind_fun_params (t, VList tl) in
-         return @@ evaledhd @ evaledtl
-       | _ -> fail MatchFailure)
-    | Pattern_tuple pl, VTuple vl -> bind_pat_list pl vl
-    | _ -> fail MatchFailure
+      match_lists env patterns values
+    | OptionalPattern p, OptionalValue v ->
+      (match p, v with
+       | Some p, Some v -> match_pattern env (p, v)
+       | None, None -> Some env
+       | _ -> None)
+    | _ -> None
+  ;;
 
-  and eval_binding bind env =
-    match bind with
-    | Let (is_rec, name, body) ->
-      if is_rec
-      then
-        let* func_body = eval body env in
-        return @@ VLetWAPat (name, func_body)
-      else eval body env
-    | Expression expr -> eval expr env
+  let eval_unary = function
+    | Negate, IntValue i -> return (IntValue (-i))
+    | LogicalNot, BoolValue b -> return (BoolValue (not b))
+    | _ -> fail TypeMismatch
+  ;;
 
-  and eval expr env =
-    match expr with
-    | Expr_const v ->
-      (match v with
-       | Const_bool b -> return @@ VBool b
-       | Const_int i -> return @@ VInt i
-       | Const_string s -> return @@ VString s
-       | Const_nil -> return VNil)
-    | Expr_bin_op (op, l, r) ->
-      let* rigth_val = eval r env in
-      let* left_val = eval l env in
-      (match op, left_val, rigth_val with
-       | Div, VInt _, VInt 0 -> fail DivisionByZero
-       | Mod, VInt _, VInt 0 -> fail DivisionByZero
-       | Add, VInt l, VInt r -> return @@ VInt (l + r)
-       | Sub, VInt l, VInt r -> return @@ VInt (l - r)
-       | Mul, VInt l, VInt r -> return @@ VInt (l * r)
-       | Div, VInt l, VInt r -> return @@ VInt (l / r)
-       | Mod, VInt l, VInt r -> return @@ VInt (l % r)
-       | Lt, VInt l, VInt r -> return @@ VBool (l < r)
-       | Leq, VInt l, VInt r -> return @@ VBool (l <= r)
-       | Gt, VInt l, VInt r -> return @@ VBool (l > r)
-       | Geq, VInt l, VInt r -> return @@ VBool (l >= r)
-       | Eq, VInt l, VInt r -> return @@ VBool (l = r)
-       | Neq, VInt l, VInt r -> return @@ VBool (l <> r)
-       | Con, h, VList tl -> return @@ VList (h :: tl)
-       | Con, h, VNil -> return @@ VList (h :: [])
-       | And, VBool lb, VBool rb -> return (VBool (lb && rb))
-       | Or, VBool lb, VBool rb -> return (VBool (lb || rb))
-       | _ -> fail TypeError)
-    | Expr_var id -> find_val env id
-    | Expr_list (h, t) ->
-      let* evaled = eval h env in
-      let rec helper acc expr =
-        match expr with
-        | Expr_const Const_nil -> acc
-        | Expr_list (hd, tl) ->
-          let* acc = acc in
-          let* evaled = eval hd env in
-          helper (return (evaled :: acc)) tl
-        | _ ->
-          let* acc = acc in
-          let* evaled = eval expr env in
-          return (evaled :: acc)
+  let eval_binary (bop, v1, v2) =
+    match bop, v1, v2 with
+    | Multiply, IntValue x, IntValue y -> return (IntValue (x * y))
+    | Divide, IntValue _, IntValue y when y = 0 -> fail DivisionByZero
+    | Divide, IntValue x, IntValue y -> return (IntValue (x / y))
+    | Add, IntValue x, IntValue y -> return (IntValue (x + y))
+    | Subtract, IntValue x, IntValue y -> return (IntValue (x - y))
+    | Equal, IntValue x, IntValue y -> return (BoolValue (x = y))
+    | NotEqual, IntValue x, IntValue y -> return (BoolValue (x <> y))
+    | Less, IntValue x, IntValue y -> return (BoolValue (x < y))
+    | LessOrEqual, IntValue x, IntValue y -> return (BoolValue (x <= y))
+    | Greater, IntValue x, IntValue y -> return (BoolValue (x > y))
+    | GreaterOrEqual, IntValue x, IntValue y -> return (BoolValue (x >= y))
+    | LogicalAnd, BoolValue x, BoolValue y -> return (BoolValue (x && y))
+    | LogicalOr, BoolValue x, BoolValue y -> return (BoolValue (x || y))
+    | _ -> fail TypeMismatch
+  ;;
+
+  let rec evaluate_expr env = function
+    | LiteralExpr c ->
+      (match c with
+       | Integer i -> return (IntValue i)
+       | Boolean b -> return (BoolValue b)
+       | Text s -> return (StringValue s))
+    | NameExpr x -> lookup env x
+    | UnaryOpExpr (op, e) ->
+      let* v = evaluate_expr env e in
+      eval_unary (op, v)
+    | BinaryOpExpr (op, e1, e2) ->
+      let* v1 = evaluate_expr env e1 in
+      let* v2 = evaluate_expr env e2 in
+      eval_binary (op, v1, v2)
+    | ConditionalExpr (cond, then_expr, else_expr_opt) ->
+      let* cond_value = evaluate_expr env cond in
+      (match cond_value with
+       | BoolValue true -> evaluate_expr env then_expr
+       | BoolValue false ->
+         (match else_expr_opt with
+          | Some else_expr -> evaluate_expr env else_expr
+          | None -> return UnitValue)
+       | _ -> fail TypeMismatch)
+    | LetExpr (false, (ListPattern patterns, e1), _, e2) ->
+      let check_list_pattern = function
+        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | _ -> false
       in
-      let* res = helper (return [ evaled ]) t in
-      let res = VList (List.rev res) in
-      return res
-    | Expr_tuple t ->
-      let* eval_list = all (List.map t ~f:(fun expr -> eval expr env)) in
-      return @@ VTuple eval_list
-    | Expr_if (cond, e_then, e_else) ->
-      let* cond_branch = eval cond env in
-      (match cond_branch with
-       | VBool b -> eval (if b then e_then else e_else) env
-       | _ -> fail TypeError)
-    | Expr_fun (pat, expr) -> return @@ VFun (pat, expr, Map.to_alist env)
-    | Expr_app (func, arg) ->
-      (match func with
-       | Expr_var name when String.equal name "print_int" ->
-         let* evaled_arg = eval arg env in
-         Stdlib.Format.printf "%s" (show_value evaled_arg);
-         return VNil
-       | _ ->
-         let* evaled_arg = eval arg env in
-         let* fun_to_apply = eval func env in
-         let* () =
-           if String.equal (show_expr func) "print_int"
-           then (
-             Stdlib.Format.printf "%s" (show_value evaled_arg);
-             return ())
-           else return ()
+      if not (List.for_all patterns ~f:check_list_pattern)
+      then fail InvalidPattern
+      else
+        let* v = evaluate_expr env e1 in
+        (match match_pattern env (ListPattern patterns, v) with
+         | Some env' -> evaluate_expr env' e2
+         | None -> fail PatternMatchFailed)
+    | LetExpr (false, (ProductPattern (p1, p2, rest), e1), _, e2) ->
+      let check_product_pattern = function
+        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | _ -> false
+      in
+      if not (List.for_all ~f:check_product_pattern (p1 :: p2 :: rest))
+      then fail InvalidPattern
+      else
+        let* v = evaluate_expr env e1 in
+        (match match_pattern env (ProductPattern (p1, p2, rest), v) with
+         | Some env' -> evaluate_expr env' e2
+         | None -> fail PatternMatchFailed)
+    | LetExpr (false, (pat, e1), _, e2) ->
+      let check_simple_pattern =
+        match pat with
+        | WildcardPattern | NamePattern _ | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | _ -> false
+      in
+      if not check_simple_pattern
+      then fail InvalidPattern
+      else
+        let* v = evaluate_expr env e1 in
+        (match match_pattern env (pat, v) with
+         | Some env' -> evaluate_expr env' e2
+         | None -> fail PatternMatchFailed)
+    | LetExpr (true, (pat, e1), [], e2) ->
+      (match pat with
+       | NamePattern _ ->
+         let* v = evaluate_expr env e1 in
+         let* rec_env =
+           match match_pattern env (pat, v) with
+           | Some new_env -> return new_env
+           | None -> fail PatternMatchFailed
          in
-         let* evaled_arg = eval arg env in
-         (match fun_to_apply with
-          | VFun (pat, expr, fun_env) ->
-            let* res = bind_fun_params ~env (pat, evaled_arg) in
-            eval expr (add_binds (add_binds empty fun_env) res)
-          | VLetWAPat (name, VFun (pat, expr, fun_env)) ->
-            let* res = bind_fun_params ~env (pat, evaled_arg) in
-            eval
-              expr
-              (add_binds
-                 (add_bind
-                    (add_binds empty fun_env)
-                    name
-                    (VLetWAPat (name, VFun (pat, expr, fun_env))))
-                 res)
-          | _ -> fail TypeError))
-    | Expr_match (expr_match, cases) ->
-      let* val_match = eval expr_match env in
-      let rec eval_match = function
-        | (pat, expr) :: cases ->
-          run
-            (bind_fun_params ~env (pat, val_match))
-            ~ok:(fun binds -> eval expr (add_binds env binds))
-            ~err:(fun _ -> eval_match cases)
-        | [] -> fail MatchFailure
+         let* recursive_value =
+           match v with
+           | ClosureValue (_, p, pl, e, _) ->
+             return (ClosureValue (true, p, pl, e, rec_env))
+           | _ -> fail TypeMismatch
+         in
+         let* final_env =
+           match match_pattern env (pat, recursive_value) with
+           | Some updated_env -> return updated_env
+           | None -> fail PatternMatchFailed
+         in
+         evaluate_expr final_env e2
+       | _ -> fail InvalidPattern)
+    | LetExpr (true, value_binding, value_bindings, e2) ->
+      let bindings = List.map ~f:(fun (p, e) -> p, e) (value_binding :: value_bindings) in
+      let rec update_env acc_env = function
+        | [] -> return acc_env
+        | (NamePattern name, expr) :: tl ->
+          let* value =
+            match expr with
+            | LambdaExpr (patterns, e) ->
+              let head = Option.value_exn (List.hd patterns) in
+              let tail = Option.value_exn (List.tl patterns) in
+              return (ClosureValue (true, head, tail, e, acc_env))
+            | _ -> evaluate_expr acc_env expr
+          in
+          let updated_env = extend acc_env name value in
+          update_env updated_env tl
+        | _ -> fail InvalidPattern
       in
-      eval_match cases
-    | Expr_let_in (_, name, expr1, expr2) ->
-      let* v_let = eval expr1 env in
-      let env = add_bind env name v_let in
-      eval expr2 env
+      let* final_env = update_env env bindings in
+      evaluate_expr final_env e2
+    | ProductExpr (e1, e2, es) ->
+      let* v1 = evaluate_expr env e1 in
+      let* v2 = evaluate_expr env e2 in
+      let* vs =
+        List.fold_right es ~init:(return []) ~f:(fun e acc ->
+          let* acc = acc in
+          let* v = evaluate_expr env e in
+          return (v :: acc))
+      in
+      return (ProductValue (v1, v2, vs))
+    | LambdaExpr (patterns, e) ->
+      let head = Option.value_exn (List.hd patterns) in
+      let tail = Option.value_exn (List.tl patterns) in
+      return (ClosureValue (false, head, tail, e, env))
+    | TypeAnnotationExpr (e, _) -> evaluate_expr env e
+    | ApplyExpr (e1, e2) ->
+      let* v1 = evaluate_expr env e1 in
+      let* v2 = evaluate_expr env e2 in
+      (match v1 with
+       | BuiltinFunction f ->
+         (match f v2 with
+          | Ok result -> return result
+          | Error err -> fail err)
+       | ClosureValue (_, pat, pats, body, func_env) ->
+         (match match_pattern func_env (pat, v2) with
+          | Some extended_env ->
+            let env' =
+              Map.fold extended_env ~init:env ~f:(fun ~key ~data acc_env ->
+                Map.update acc_env key ~f:(fun _ -> data))
+            in
+            (match pats with
+             | [] -> evaluate_expr env' body
+             | p :: pl -> return (ClosureValue (false, p, pl, body, env')))
+          | None -> fail PatternMatchFailed)
+       | _ -> fail TypeMismatch)
+    | ListExpr el ->
+      let rec eval_list_elements env = function
+        | [] -> return []
+        | e :: es ->
+          let* v = evaluate_expr env e in
+          let* vs = eval_list_elements env es in
+          return (v :: vs)
+      in
+      let* vl = eval_list_elements env el in
+      return (ListValue vl)
+    | OptionalExpr opt ->
+      let* value =
+        match opt with
+        | Some expr ->
+          let* v = evaluate_expr env expr in
+          return (Some v)
+        | None -> return None
+      in
+      return (OptionalValue value)
   ;;
 
-  let eval_program (program : struct_prog list) : (value, error_inter) t =
-    let rec helper env = function
-      | h :: [] -> eval_binding h env
-      | [] -> fail EmptyProgram
-      | h :: tl ->
-        let* eval_h = eval_binding h env in
-        let eval_env =
-          match h with
-          | Let (_, f, _) -> add_bind env f eval_h
-          | _ -> env
-        in
-        helper eval_env tl
-    in
-    helper empty program
+  let evaluate_declaration env = function
+    | ExprDeclaration expr ->
+      let* _ = evaluate_expr env expr in
+      return env
+    | BindingDeclaration (false, (ListPattern patterns, e), _) ->
+      let check_list_pattern = function
+        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | _ -> false
+      in
+      if not (List.for_all ~f:check_list_pattern patterns)
+      then fail InvalidPattern
+      else
+        let* v = evaluate_expr env e in
+        (match match_pattern env (ListPattern patterns, v) with
+         | Some env' -> return env'
+         | None -> fail PatternMatchFailed)
+    | BindingDeclaration (false, (ProductPattern (p1, p2, rest), e), _) ->
+      let check_product_pattern = function
+        | NamePattern _ | WildcardPattern | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | _ -> false
+      in
+      if not (List.for_all ~f:check_product_pattern (p1 :: p2 :: rest))
+      then fail InvalidPattern
+      else
+        let* v = evaluate_expr env e in
+        (match match_pattern env (ProductPattern (p1, p2, rest), v) with
+         | Some env' -> return env'
+         | None -> fail PatternMatchFailed)
+    | BindingDeclaration (false, (pattern, expr), _) ->
+      let check_simple_pattern =
+        match pattern with
+        | WildcardPattern | NamePattern _ | UnitPattern | OptionalPattern (Some (NamePattern _)) -> true
+        | _ -> false
+      in
+      if not check_simple_pattern
+      then fail InvalidPattern
+      else
+        let* v = evaluate_expr env expr in
+        (match match_pattern env (pattern, v) with
+         | Some env' -> return env'
+         | None -> fail PatternMatchFailed)
+    | BindingDeclaration (true, ((NamePattern _ as pattern), expr), []) ->
+      let* v = evaluate_expr env expr in
+      let* rec_env =
+        match match_pattern env (pattern, v) with
+        | Some new_env -> return new_env
+        | None -> fail PatternMatchFailed
+      in
+      let* recursive_value =
+        match v with
+        | ClosureValue (_, p, pl, expr, _) ->
+          return (ClosureValue (true, p, pl, expr, rec_env))
+        | _ -> fail TypeMismatch
+      in
+      let* final_env =
+        match match_pattern env (pattern, recursive_value) with
+        | Some updated_env -> return updated_env
+        | None -> fail PatternMatchFailed
+      in
+      return final_env
+    | BindingDeclaration (true, _, []) -> fail InvalidPattern
+    | BindingDeclaration (true, value_binding, value_bindings) ->
+      let bindings = value_binding :: value_bindings in
+      let rec update_env acc_env = function
+        | [] -> return acc_env
+        | (NamePattern name, expr) :: tl ->
+          let* value =
+            match expr with
+            | LambdaExpr (patterns, expr) ->
+              let head = Option.value_exn (List.hd patterns) in
+              let tail = Option.value_exn (List.tl patterns) in
+              return (ClosureValue (true, head, tail, expr, acc_env))
+            | _ -> evaluate_expr acc_env expr
+          in
+          let updated_env = extend acc_env name value in
+          update_env updated_env tl
+        | _ -> fail InvalidPattern
+      in
+      let* final_env = update_env env bindings in
+      return final_env
+  ;;
+
+  let evaluate_script script =
+    List.fold_left script ~init:(return initial_env) ~f:(fun env decl ->
+      let* env = env in
+      let* env = evaluate_declaration env decl in
+      return env)
   ;;
 end
 
-module InterpretResult = Interpret (struct
-    include Result
 
-    let run x ~ok ~err =
-      match x with
-      | Ok v -> ok v
-      | Error e -> err e
-    ;;
+module ResultMonad = struct
+  type ('a, 'e) monad = ('a, 'e) Result.t
 
-    let ( let* ) monad f = bind monad ~f
-  end)
+  let return = Result.return
+  let fail = Result.fail
+  let ( let* ) m f = Result.bind m ~f
+end
+
+module Eval = Evaluator (ResultMonad)

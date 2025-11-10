@@ -2,14 +2,33 @@
 
 (** SPDX-License-Identifier: LGPL-3.0-or-later *)
 
-open Angstrom
 open Ast
 open Base
+open Angstrom
 
-let start_parsing parser string = parse_string ~consume:All parser string
+let is_reserved = function
+  | "let"
+  | "match"
+  | "in"
+  | "if"
+  | "then"
+  | "else"
+  | "fun"
+  | "rec"
+  | "true"
+  | "false"
+  | "Some"
+  | "and" -> true
+  | _ -> false
+;;
 
-let is_char = function
+let is_lowercase = function
   | 'a' .. 'z' -> true
+  | _ -> false
+;;
+
+let is_uppercase = function
+  | 'A' .. 'Z' -> true
   | _ -> false
 ;;
 
@@ -18,308 +37,277 @@ let is_digit = function
   | _ -> false
 ;;
 
-let is_keyword = function
-  | "let"
-  | "rec"
-  | "fun"
-  | "if"
-  | "then"
-  | "else"
-  | "true"
-  | "false"
-  | "match"
-  | "with"
-  | "in" -> true
-  | _ -> false
+let whitespace = take_while Char.is_whitespace
+let symbol s = whitespace *> string s
+let symbol1 s = whitespace *> s
+let parenthesized p = symbol "(" *> p <* symbol ")"
+
+let parse_int_lit =
+  let sign = choice [ symbol "" ] in
+  let num = take_while1 Char.is_digit in
+  lift2 (fun s n -> Integer (Int.of_string (s ^ n))) sign num
 ;;
 
-let is_whitespace = function
-  | ' ' | '\n' | '\t' | '\r' -> true
-  | _ -> false
+let parse_bool_lit =
+  choice
+    [ symbol "true" *> return (Boolean true); symbol "false" *> return (Boolean false) ]
 ;;
 
-let is_underscore = function
-  | c -> Char.equal c '_'
+let parse_string_lit =
+  symbol "\"" *> take_till (Char.equal '\"') <* symbol "\"" >>| fun s -> Text s
 ;;
 
-let chainl1 e op =
-  let rec go acc = lift2 (fun f x -> f acc x) op e >>= go <|> return acc in
-  e >>= go
-;;
+let parse_literal = choice [ parse_int_lit; parse_bool_lit; parse_string_lit ]
+let parse_unary_op = choice [ symbol "-" *> return Negate; symbol "not" *> return LogicalNot ]
 
-(* Simple parsers *)
-
-let parse_white_space = take_while is_whitespace
-let parse_white_space1 = take_while1 is_whitespace
-let parse_token s = parse_white_space *> s
-let parse_token1 s = parse_white_space1 *> s
-let pstrtoken s = parse_white_space *> string s
-let pstrtoken1 s = parse_white_space1 *> string s
-let parens p = pstrtoken "(" *> p <* pstrtoken ")"
-
-(* Parse const *)
-
-let parse_bool =
-  (fun _ -> Const_bool true)
-  <$> string "true"
-  <|> ((fun _ -> Const_bool false) <$> string "false")
-;;
-
-let parse_int =
-  take_while1 (function
-    | '0' .. '9' -> true
-    | _ -> false)
-  >>= fun digits -> return (Const_int (Int.of_string digits))
-;;
-
-let parse_string =
-  (fun strk -> Const_string strk)
-  <$> (char '"' *> take_while1 (fun a -> not (phys_equal a '"')) <* char '"')
-;;
-
-let parse_const = parse_bool <|> parse_int <|> parse_string
-let parse_someeee = parse_white_space *> string "()" *> return "()"
-
-let check_var cond =
-  parse_white_space *> take_while1 cond
-  >>= fun v ->
-  if String.length v |> phys_equal 0
-  then fail "Not identifier"
-  else if is_keyword v
-  then fail ("You can not use" ^ v ^ "keywords as vars")
-  else if Char.is_digit @@ String.get v 0
-  then fail "Identifier first sumbol is letter, not digit"
-  else return v
-;;
-
-let parse_var =
-  parse_someeee
-  <|>
-  let is_entry = function
-    | c -> is_char c || is_underscore c || is_digit c
+let parse_name =
+  let first_char =
+    satisfy (fun ch -> is_lowercase ch || is_uppercase ch || Char.equal ch '_')
+    >>| Char.escaped
   in
-  check_var is_entry
+  let other_chars =
+    take_while (fun ch ->
+      is_lowercase ch || is_uppercase ch || is_digit ch || Char.equal ch '_')
+  in
+  symbol1 @@ lift2 ( ^ ) first_char other_chars
+  >>= fun s -> if is_reserved s then fail "Not a valid name" else return s
 ;;
 
-(* Parse pattern *)
-
-let parse_pattern_var = (fun v -> Pattern_id v) <$> parse_var
-let parse_wild = (fun _ -> Pattern_wild) <$> pstrtoken "_"
-let parse_pattern_const = (fun c -> Pattern_const c) <$> parse_const
-
-let parse_tuple parser =
-  lift2
-    (fun a b -> Pattern_tuple (a :: b))
-    (parse_token parser)
-    (many1 (pstrtoken "," *> parser))
+let parse_base_type =
+  choice
+    [ symbol "int" *> return (BaseType "int")
+    ; symbol "bool" *> return (BaseType "bool")
+    ; symbol "string" *> return (BaseType "string")
+    ; symbol "unit" *> return (BaseType "unit")
+    ]
 ;;
 
-let rec constr_con = function
-  | [] -> Pattern_const Const_nil
-  | hd :: [] when equal_pattern hd (Pattern_const Const_nil) -> Pattern_const Const_nil
-  | [ f; s ] -> Pattern_list (f, s)
-  | hd :: tl -> Pattern_list (hd, constr_con tl)
+let rec parse_type_list t =
+  let* base = t in
+  whitespace
+  *> symbol "list"
+  *> (parse_type_list (return (ListType base)) <|> return (ListType base))
 ;;
 
-let parser_con c =
-  lift2
-    (fun a b -> constr_con @@ (a :: b))
-    (c <* pstrtoken "::" <|> (parens c <* pstrtoken "::"))
-    (sep_by (pstrtoken "::") (c <|> parens c))
+let parse_type_expr =
+  let base_type = parse_base_type in
+  let list_type = parse_type_list base_type <|> base_type in
+  list_type
 ;;
 
-let parse_con_2 parser constructor =
-  constructor <$> (pstrtoken "[" *> sep_by1 (pstrtoken ";") parser <* pstrtoken "]")
+let parse_annotated_pattern parse_pattern =
+  let* pat = whitespace *> symbol "(" *> parse_pattern in
+  let* constr =
+    whitespace *> symbol ":" *> whitespace *> parse_type_expr <* whitespace <* symbol ")"
+  in
+  return (AnnotatedPattern (pat, constr))
+;;
+
+let parse_name_pattern = parse_name >>| fun id -> NamePattern id
+let parse_literal_pattern = parse_literal >>| fun c -> LiteralPattern c
+let parse_wildcard_pattern = symbol "_" *> return WildcardPattern
+
+let parse_product_pattern parse_pattern =
+  let parse_unparenthesized =
+    lift3
+      (fun p1 p2 rest -> ProductPattern (p1, p2, rest))
+      parse_pattern
+      (symbol "," *> parse_pattern)
+      (many (symbol "," *> parse_pattern))
+    <* whitespace
+  in
+  parenthesized parse_unparenthesized <|> parse_unparenthesized
+;;
+
+let parse_list_pattern parse_pattern =
+  let semicols = symbol ";" in
+  symbol "[" *> (sep_by semicols parse_pattern >>| fun patterns -> ListPattern patterns)
+  <* symbol "]"
+;;
+
+let parse_unit_pattern = symbol "()" *> return UnitPattern
+
+let parse_optional_pattern parse_pattern =
+  lift
+    (fun e -> OptionalPattern e)
+    (symbol "Some" *> parse_pattern
+     >>| (fun e -> Some e)
+     <|> (symbol "None" >>| fun _ -> None))
 ;;
 
 let parse_pattern =
-  fix
-  @@ fun pack ->
-  let value = parse_wild <|> parse_pattern_const <|> parse_pattern_var in
-  let tuple = parens @@ parse_tuple (value <|> pack) in
-  let con =
-    parser_con (tuple <|> parse_con_2 pack constr_con <|> value)
-    <|> parse_con_2 (tuple <|> pack) constr_con
-  in
-  choice [ con; tuple; value ]
-;;
-
-(* Parse expr *)
-
-let p_op char_op op = pstrtoken char_op *> return (fun e1 e2 -> Expr_bin_op (op, e1, e2))
-let pmulti = p_op "*" Mul <|> p_op "/" Div <|> p_op "%" Mod
-let pcons = p_op "::" Con
-let padd = p_op "+" Add <|> p_op "-" Sub
-let pcomp = p_op ">=" Geq <|> p_op ">" Gt <|> p_op "<=" Leq <|> p_op "<" Lt
-let peq = p_op "=" Eq <|> p_op "<>" Neq
-let pconj = p_op "&&" And
-let pdisj = p_op "||" Or
-let constr_case pat expr = pat, expr
-let constr_efun pl e = List.fold_right ~init:e ~f:(fun p e -> Expr_fun (p, e)) pl
-let parse_econst = (fun v -> Expr_const v) <$> parse_const
-let parse_evar = (fun v -> Expr_var v) <$> parse_var
-
-let parse_cons_semicolon_expr parser constructor =
-  constructor <$> (pstrtoken "[" *> sep_by (pstrtoken ";") parser <* pstrtoken "]")
-;;
-
-let parse_tuple_expr parser =
-  lift2
-    (fun a b -> Expr_tuple (a :: b))
-    (parser <* pstrtoken ",")
-    (sep_by1 (pstrtoken ",") parser)
-;;
-
-let plet_body pargs pexpr =
-  parse_token1 pargs
-  >>= fun args -> pstrtoken "=" *> pexpr >>| fun expr -> constr_efun args expr
-;;
-
-let parse_fun_args = fix @@ fun p -> many1 parse_pattern <|> parens p
-
-type edispatch =
-  { list_e : edispatch -> expr t
-  ; tuple_e : edispatch -> expr t
-  ; fun_e : edispatch -> expr t
-  ; app_e : edispatch -> expr t
-  ; if_e : edispatch -> expr t
-  ; let_in_e : edispatch -> expr t
-  ; matching_e : edispatch -> expr t
-  ; bin_e : edispatch -> expr t
-  ; expr_parsers : edispatch -> expr t
-  }
-
-let pack =
-  let expr_parsers pack = pack.bin_e pack <|> pack.matching_e pack in
-  let value_e = fix @@ fun _ -> parse_evar <|> parse_econst in
-  let op_parsers pack =
-    parse_white_space
-    *> choice
-         [ pack.if_e pack
-         ; pack.let_in_e pack
-         ; pack.fun_e pack
-         ; pack.app_e pack <|> parens @@ pack.app_e pack
-         ; parens @@ choice [ pack.tuple_e pack; pack.bin_e pack ]
-         ; value_e
-         ; pack.list_e pack
-         ]
-  in
-  let app_args_parsers pack =
-    choice
-      [ pack.list_e pack
-      ; parens
-        @@ choice
-             [ pack.expr_parsers pack
-             ; pack.let_in_e pack
-             ; pack.app_e pack
-             ; pack.fun_e pack
-             ; pack.tuple_e pack
-             ]
-      ; value_e
-      ]
-  in
-  let bin_e pack =
-    fix
-    @@ fun _ ->
-    let multi = chainl1 (op_parsers pack) pmulti in
-    let add = chainl1 multi padd in
-    let cons = chainl1 add pcons in
-    let comp = chainl1 cons pcomp in
-    let eq = chainl1 comp peq in
-    let conj = chainl1 eq pconj in
-    chainl1 conj pdisj <* parse_white_space
-  in
-  let matching_e pack =
-    fix
-    @@ fun _ ->
-    lift2
-      (fun e cases -> Expr_match (e, cases))
-      (pstrtoken "match" *> op_parsers pack <* pstrtoken1 "with")
-      (let case2 =
-         lift2
-           constr_case
-           (pstrtoken "|" *> parse_pattern <* pstrtoken "->")
-           (op_parsers pack)
-       in
-       let case1 =
-         lift2 constr_case (parse_pattern <* pstrtoken "->") (op_parsers pack)
-       in
-       let cases = lift2 (fun h tl -> h :: tl) (case1 <|> case2) (many case2) in
-       cases)
-  in
-  let if_e pack =
-    fix
-    @@ fun _ ->
-    lift3
-      (fun e1 e2 e3 -> Expr_if (e1, e2, e3))
-      (pstrtoken "if" *> expr_parsers pack)
-      (pstrtoken "then" *> expr_parsers pack)
-      (pstrtoken "else" *> expr_parsers pack)
-  in
-  let list_e pack =
-    fix
-    @@ fun _ ->
-    let rec create_cons_sc = function
-      | [] -> Expr_const Const_nil
-      | hd :: [] when equal_expr hd (Expr_const Const_nil) -> Expr_const Const_nil
-      | hd :: tl -> Expr_list (hd, create_cons_sc tl)
+  fix (fun pat ->
+    let atom =
+      choice
+        [ parse_name_pattern
+        ; parse_wildcard_pattern
+        ; parse_literal_pattern
+        ; parse_unit_pattern
+        ; parse_annotated_pattern pat
+        ; parenthesized pat
+        ; parse_optional_pattern pat
+        ]
     in
-    parse_cons_semicolon_expr (expr_parsers pack) create_cons_sc
-  in
-  let tuple_e pack = fix @@ fun _ -> parse_tuple_expr (expr_parsers pack) in
-  let let_in_e pack =
-    let lift5 f p1 p2 p3 p4 p5 = f <$> p1 <*> p2 <*> p3 <*> p4 <*> p5 in
-    fix
-    @@ fun _ ->
-    lift5
-      (fun is_rec name args expr1 expr2 ->
-        let expr = constr_efun args expr1 in
-        Expr_let_in (is_rec, name, expr, expr2))
-      (pstrtoken "let"
-       *> option false (parse_token (string "rec") <* parse_white_space1 >>| fun _ -> true)
-      )
-      parse_var
-      (many parse_pattern)
-      (pstrtoken1 "=" *> expr_parsers pack)
-      (pstrtoken "in" *> expr_parsers pack)
-  in
-  let fun_e pack =
-    fix
-    @@ fun _ ->
-    lift2
-      constr_efun
-      (pstrtoken "fun" *> parse_fun_args)
-      (pstrtoken "->" *> expr_parsers pack)
-  in
-  let app_e pack =
-    fix
-    @@ fun _ ->
-    lift2
-      (fun f args -> List.fold_left ~init:f ~f:(fun f arg -> Expr_app (f, arg)) args)
-      (value_e <|> parens @@ choice [ fun_e pack; pack.app_e pack ])
-      (many1 (parse_token1 @@ app_args_parsers pack))
-  in
-  { list_e; tuple_e; fun_e; let_in_e; app_e; if_e; expr_parsers; matching_e; bin_e }
+    let tuple = parse_product_pattern atom <|> atom in
+    let lst = parse_list_pattern tuple <|> tuple in
+    lst)
 ;;
 
-let parse_expression = pack.expr_parsers pack
-
-let let_e parse =
-  fix
-  @@ fun _ ->
-  lift4
-    (fun flag name args body ->
-      let body = constr_efun args body in
-      Let (flag, name, body))
-    (pstrtoken "let"
-     *> option false (parse_token (string "rec") <* parse_white_space1 >>| fun _ -> true)
-    )
-    parse_var
-    (parse_white_space *> many (parse_pattern <|> parens parse_pattern))
-    (pstrtoken "=" *> parse)
+let parse_left_associative expr oper =
+  let rec go acc = lift2 (fun f x -> f acc x) oper expr >>= go <|> return acc in
+  expr >>= go
 ;;
 
-let expr_main = (fun expr -> Expression expr) <$> parse_expression
-let parse_bind = choice [ let_e parse_expression; expr_main ]
-let program = many1 (parse_token parse_bind <* parse_token (many1 (pstrtoken ";;")))
-let main_parse str = start_parsing program (String.strip str)
+let parse_binary_op parse_bin_op tkn =
+  symbol tkn *> return (fun e1 e2 -> BinaryOpExpr (parse_bin_op, e1, e2))
+;;
+
+let multiply = parse_binary_op Multiply "*"
+let divide = parse_binary_op Divide "/"
+let add = parse_binary_op Add "+"
+let subtract = parse_binary_op Subtract "-"
+
+let compare_ops =
+  choice
+    [ parse_binary_op Equal "="
+    ; parse_binary_op NotEqual "<>"
+    ; parse_binary_op LessOrEqual "<="
+    ; parse_binary_op Less "<"
+    ; parse_binary_op GreaterOrEqual ">="
+    ; parse_binary_op Greater ">"
+    ]
+;;
+
+let and_op = parse_binary_op LogicalAnd "&&"
+let or_op = parse_binary_op LogicalOr "||"
+let parse_name_expr = parse_name >>| fun x -> NameExpr x
+let parse_literal_expr = parse_literal >>| fun c -> LiteralExpr c
+
+let parse_annotated_expr parse_expr =
+  let parse_type_annotation = symbol ":" *> parse_type_expr in
+  lift2 (fun expr t -> TypeAnnotationExpr (expr, t)) parse_expr parse_type_annotation
+;;
+
+let parse_conditional_expr parse_expr =
+  lift3
+    (fun cond t f -> ConditionalExpr (cond, t, f))
+    (symbol "if" *> parse_expr)
+    (symbol "then" *> parse_expr)
+    (option None (symbol "else" *> parse_expr >>| Option.some))
+;;
+
+let parse_optional_expr parse_expr =
+  choice
+    [ symbol "None" *> return (OptionalExpr None)
+    ; (symbol "Some" *> choice [ parenthesized parse_expr; parse_expr ]
+       >>| fun e -> OptionalExpr (Some e))
+    ]
+;;
+
+let parse_unary_op_expr parse_expr =
+  parse_unary_op >>= fun op -> parse_expr >>= fun expr -> return (UnaryOpExpr (op, expr))
+;;
+
+let parse_list_expr parse_expr =
+  let parse_elements = sep_by (symbol ";") parse_expr in
+  symbol "[" *> parse_elements <* symbol "]" >>| fun elements -> ListExpr elements
+;;
+
+let parse_application_expr e =
+  parse_left_associative e (return (fun e1 e2 -> ApplyExpr (e1, e2)))
+;;
+
+let parse_lambda_expr parse_expr =
+  symbol "fun" *> sep_by1 whitespace parse_pattern
+  <* symbol "->"
+  >>= fun params -> parse_expr >>| fun body -> LambdaExpr (params, body)
+;;
+
+let parse_product_expr parse_expr =
+  let commas = symbol "," in
+  let product =
+    lift3
+      (fun e1 e2 rest -> ProductExpr (e1, e2, rest))
+      (parse_expr <* commas)
+      parse_expr
+      (many (commas *> parse_expr))
+    <* whitespace
+  in
+  parenthesized product <|> product
+;;
+
+let parse_function_body parse_expr =
+  many1 parse_pattern
+  >>= fun patterns -> symbol "=" *> parse_expr >>| fun body -> LambdaExpr (patterns, body)
+;;
+
+let parse_let_expr parse_expr =
+  symbol "let"
+  *> lift4
+       (fun rec_flag value_bindings and_bindings body ->
+         LetExpr (rec_flag, value_bindings, and_bindings, body))
+       (symbol "rec" *> (take_while1 Char.is_whitespace *> return true) <|> return false)
+       (lift2
+          (fun pat expr -> pat, expr)
+          parse_pattern
+          (symbol "=" *> parse_expr <|> parse_function_body parse_expr))
+       (many
+          (symbol "and"
+           *> lift2
+                (fun pat expr -> pat, expr)
+                parse_pattern
+                (symbol "=" *> parse_expr <|> parse_function_body parse_expr)))
+       (symbol "in" *> parse_expr)
+;;
+
+let parse_expr =
+  fix (fun expr ->
+    let term =
+      choice
+        [ parse_name_expr
+        ; parse_literal_expr
+        ; parse_list_expr expr
+        ; parenthesized expr
+        ; parenthesized (parse_annotated_expr expr)
+        ]
+    in
+    let func = parse_application_expr term in
+    let cons = parse_optional_expr func <|> func in
+    let ife = parse_conditional_expr expr <|> cons in
+    let unops = parse_unary_op_expr ife <|> ife in
+    let ops1 = parse_left_associative unops (multiply <|> divide) in
+    let ops2 = parse_left_associative ops1 (add <|> subtract) in
+    let cmp = parse_left_associative ops2 compare_ops in
+    let boolean = parse_left_associative cmp (and_op <|> or_op) in
+    let tuple = parse_product_expr boolean <|> boolean in
+    let lambda = parse_lambda_expr expr <|> tuple in
+    choice [ parse_let_expr expr; parse_lambda_expr expr; lambda ])
+;;
+
+let parse_declaration =
+  let parse_eval = parse_expr >>| fun e -> ExprDeclaration e in
+  let parse_binding =
+    symbol "let"
+    *> lift3
+         (fun r id id_list -> BindingDeclaration (r, id, id_list))
+         (symbol "rec" *> (take_while1 Char.is_whitespace *> return true) <|> return false)
+         (lift2
+            (fun pat expr -> pat, expr)
+            parse_pattern
+            (symbol "=" *> parse_expr <|> parse_function_body parse_expr))
+         (many
+            (symbol "and"
+             *> lift2
+                  (fun pat expr -> pat, expr)
+                  parse_pattern
+                  (symbol "=" *> parse_expr <|> parse_function_body parse_expr)))
+  in
+  choice [ parse_eval; parse_binding ]
+;;
+
+let parse_script =
+  let definitions_or_exprs = many parse_declaration <* option () (symbol ";;" >>| ignore) in
+  definitions_or_exprs <* whitespace
+;;
+
+let parse input = parse_string ~consume:All parse_script input
